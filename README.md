@@ -50,9 +50,20 @@ Data for this study will be drawn from:
    - Assemble an interactive dashboard summarizing key insights.
 
 ## Hypothesis
-H₀: The opponent team’s average offensive efficiency from the timeout taken by the team trailing in the opponent’s scoring run until the end of the quarter equals the opponent team’s average offensive efficiency from the start of the quarter until the opponent’s scoring run ends, when the timeout is taken, meaning the timeout has no effect on opponent efficiency.
+- **Opponent Team:** the team on the scoring run.  
+- **Timeout‑Taking Team:** the team trailing that calls the timeout.  
 
-H₁: The opponent team’s average offensive efficiency from the timeout taken by the team trailing in the opponent’s scoring run until the end of the quarter differs from the opponent team’s average offensive efficiency from the start of the quarter until the opponent’s scoring run ends , when the timeout is taken, meaning the timeout has an effect on opponent efficiency.
+**Null Hypothesis (H₀):**  
+When, within a period, the opponent team makes a scoring run and the timeout‑taking team calls a timeout, the opponent team’s average offensive efficiency from the **start of the period to the timeout** equals its average offensive efficiency from the **timeout to the end of the period**.  
+\[
+H₀:\ \mu_{\text{period start → timeout}} = \mu_{\text{timeout → period end}}
+\]
+
+**Alternative Hypothesis (H₁):**  
+Under the same scenario, the opponent team’s average offensive efficiency from the **start of the period to the timeout** differs from its average offensive efficiency from the **timeout to the end of the period**, indicating that the timeout affects efficiency.  
+\[
+H₁:\ \mu_{\text{period start → timeout}} \neq \mu_{\text{timeout → period end}}
+\]
 
 ## Expected Results and Outputs
 - A detailed analysis quantifying the impact of timeouts on offensive efficiency.
