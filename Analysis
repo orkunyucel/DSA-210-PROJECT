@@ -1,0 +1,967 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# NBA Timeout Effect Analysis\n",
+    "\n",
+    "This notebook analyzes the effect of timeouts on opponent scoring momentum in NBA games. We investigate whether timeouts effectively \"stop the bleeding\" by examining changes in offensive efficiency before and after a timeout is called during an opponent's scoring run.\n",
+    "\n",
+    "## Research Question\n",
+    "Do timeouts called during an opponent's scoring run actually disrupt momentum by decreasing their offensive efficiency?\n",
+    "\n",
+    "## Hypothesis\n",
+    "- **Null Hypothesis (H₀):** When the opponent team makes a scoring run and a timeout is called, the opponent's average offensive efficiency from the start of the period to the timeout equals its average offensive efficiency from the timeout to the end of the period.\n",
+    "- **Alternative Hypothesis (H₁):** Under the same scenario, the opponent's average offensive efficiency changes after a timeout is called."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1. Setup and Imports"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Import required libraries\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "from scipy import stats\n",
+    "import os\n",
+    "import warnings\n",
+    "\n",
+    "# Suppress warnings for clean output\n",
+    "warnings.filterwarnings('ignore')\n",
+    "\n",
+    "# Create folder for figures if it doesn't exist\n",
+    "os.makedirs(\"outputs/figures\", exist_ok=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2. Data Loading and Cleaning\n",
+    "\n",
+    "First, we load the timeout analysis data that was collected using the `data_collector.py` script. This dataset contains information about timeouts called during opponent scoring runs, including offensive efficiency metrics before and after each timeout."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def load_and_clean_data(file_path):\n",
+    "    \"\"\"Load and clean timeout analysis data\"\"\"\n",
+    "    \n",
+    "    if not os.path.exists(file_path):\n",
+    "        print(f\"Error: Data file {file_path} not found\")\n",
+    "        return None\n",
+    "    \n",
+    "    print(f\"Loading data from {file_path}...\")\n",
+    "    \n",
+    "    # Load data\n",
+    "    df = pd.read_csv(file_path)\n",
+    "    \n",
+    "    # Check for empty DataFrame\n",
+    "    if df.empty:\n",
+    "        print(\"Data file is empty!\")\n",
+    "        return df\n",
+    "    \n",
+    "    print(f\"Loaded {len(df)} timeout records\")\n",
+    "    \n",
+    "    # Data cleaning\n",
+    "    # Convert boolean columns\n",
+    "    if 'effective' in df.columns and df['effective'].dtype != bool:\n",
+    "        df['effective'] = df['effective'].astype(bool)\n",
+    "    if 'run_terminated' in df.columns and df['run_terminated'].dtype != bool:\n",
+    "        df['run_terminated'] = df['run_terminated'].astype(bool)\n",
+    "    \n",
+    "    # Handle missing values\n",
+    "    for col in df.columns:\n",
+    "        if df[col].dtype in [np.float64, np.int64]:\n",
+    "            missing = df[col].isna().sum()\n",
+    "            if missing > 0:\n",
+    "                print(f\"Found {missing} missing values in '{col}' column, filled with zeros\")\n",
+    "                df[col] = df[col].fillna(0)\n",
+    "    \n",
+    "    # Check and handle outliers\n",
+    "    for col in ['pre_timeout_oe', 'post_timeout_oe', 'efficiency_change']:\n",
+    "        if col in df.columns:\n",
+    "            # Find outliers (values more than 3 std deviations from the mean)\n",
+    "            mean = df[col].mean()\n",
+    "            std = df[col].std()\n",
+    "            outliers = df[(df[col] > mean + 3*std) | (df[col] < mean - 3*std)]\n",
+    "            \n",
+    "            if len(outliers) > 0:\n",
+    "                print(f\"Found {len(outliers)} potential outliers in '{col}' column\")\n",
+    "                # Clip outliers\n",
+    "                df[col] = df[col].clip(mean - 3*std, mean + 3*std)\n",
+    "    \n",
+    "    # Create run size categories if not already present\n",
+    "    if 'run_points' in df.columns and 'run_size_bin' not in df.columns:\n",
+    "        df['run_size_bin'] = pd.cut(\n",
+    "            df['run_points'],\n",
+    "            bins=[5, 8, 10, 12, 15, 20, 100],\n",
+    "            labels=['6-7', '8-9', '10-11', '12-14', '15-19', '20+']\n",
+    "        )\n",
+    "    \n",
+    "    # Create score difference bins\n",
+    "    if 'score_diff' in df.columns:\n",
+    "        df['score_situation'] = pd.cut(\n",
+    "            df['score_diff'],\n",
+    "            bins=[-100, -20, -10, -5, 0, 5, 10, 20, 100],\n",
+    "            labels=['Down 20+', 'Down 10-19', 'Down 5-9', 'Down 1-4', \n",
+    "                   'Up 1-4', 'Up 5-9', 'Up 10-19', 'Up 20+']\n",
+    "        )\n",
+    "    \n",
+    "    return df"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Try both possible file paths\n",
+    "if os.path.exists('outputs/timeout_analysis_results.csv'):\n",
+    "    file_path = 'outputs/timeout_analysis_results.csv'\n",
+    "elif os.path.exists('outputs/timeout_analysis_results_partial.csv'):\n",
+    "    file_path = 'outputs/timeout_analysis_results_partial.csv'\n",
+    "else:\n",
+    "    # If file is in the current working directory\n",
+    "    if os.path.exists('timeout_analysis_results.csv'):\n",
+    "        file_path = 'timeout_analysis_results.csv'\n",
+    "    elif os.path.exists('timeout_analysis_results_partial.csv'):\n",
+    "        file_path = 'timeout_analysis_results_partial.csv'\n",
+    "    else:\n",
+    "        file_path = 'outputs/timeout_analysis_results_partial.csv'  # Default path\n",
+    "\n",
+    "# Load the data\n",
+    "results_df = load_and_clean_data(file_path)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Display the first few rows of the dataset\n",
+    "results_df.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Display summary statistics\n",
+    "results_df.describe()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3. Statistical Analysis\n",
+    "\n",
+    "Now we'll perform statistical analysis on the data to determine if timeouts significantly affect opponent offensive efficiency."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def perform_statistical_analysis(results_df):\n",
+    "    \"\"\"Perform statistical analysis on timeout results\"\"\"\n",
+    "    \n",
+    "    if results_df is None or results_df.empty:\n",
+    "        print(\"No data for analysis\")\n",
+    "        return {}\n",
+    "    \n",
+    "    analysis_results = {}\n",
+    "    \n",
+    "    # Overall effectiveness\n",
+    "    total_timeouts = len(results_df)\n",
+    "    effective_timeouts = results_df['effective'].sum()\n",
+    "    effectiveness_rate = effective_timeouts / total_timeouts if total_timeouts > 0 else 0\n",
+    "    \n",
+    "    analysis_results['overall'] = {\n",
+    "        'total_timeouts': total_timeouts,\n",
+    "        'effective_timeouts': effective_timeouts,\n",
+    "        'effectiveness_rate': effectiveness_rate,\n",
+    "        'avg_efficiency_change': results_df['efficiency_change'].mean()\n",
+    "    }\n",
+    "    \n",
+    "    print(\"\\nOverall Results:\")\n",
+    "    print(f\"Total timeouts analyzed: {total_timeouts}\")\n",
+    "    print(f\"Effective timeouts: {effective_timeouts} ({effectiveness_rate*100:.1f}%)\")\n",
+    "    print(f\"Average change in opponent efficiency: {results_df['efficiency_change'].mean():.3f}\")\n",
+    "    \n",
+    "    # Determining if the change is statistically significant with t-test\n",
+    "    try:\n",
+    "        t_stat, p_value = stats.ttest_1samp(results_df['efficiency_change'], 0)\n",
+    "        analysis_results['t_test'] = {\n",
+    "            't_statistic': t_stat,\n",
+    "            'p_value': p_value,\n",
+    "            'significant': p_value < 0.05\n",
+    "        }\n",
+    "        \n",
+    "        print(\"\\nStatistical Test Results:\")\n",
+    "        print(f\"t-statistic: {t_stat:.3f}\")\n",
+    "        \n",
+    "        # Use scientific notation for p-value to handle very small values\n",
+    "        if p_value < 1e-12:\n",
+    "            print(f\"p-value: {p_value:.6e} (extremely significant)\")\n",
+    "        else:\n",
+    "            print(f\"p-value: {p_value:.6e}\")\n",
+    "            \n",
+    "        print(f\"The effect is {'statistically significant' if p_value < 0.05 else 'not statistically significant'}\")\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error performing t-test: {e}\")\n",
+    "        analysis_results['t_test'] = {\n",
+    "            't_statistic': None,\n",
+    "            'p_value': None,\n",
+    "            'significant': False\n",
+    "        }\n",
+    "    \n",
+    "    # Paired t-test: comparing pre-timeout and post-timeout efficiency directly\n",
+    "    try:\n",
+    "        t_paired, p_paired = stats.ttest_rel(results_df['pre_timeout_oe'], results_df['post_timeout_oe'])\n",
+    "        analysis_results['paired_t_test'] = {\n",
+    "            't_statistic': t_paired,\n",
+    "            'p_value': p_paired,\n",
+    "            'significant': p_paired < 0.05\n",
+    "        }\n",
+    "        \n",
+    "        print(\"\\nPaired T-Test (Pre vs Post Timeout Efficiency):\")\n",
+    "        print(f\"t-statistic: {t_paired:.3f}\")\n",
+    "        \n",
+    "        # Use scientific notation for p-value to handle very small values\n",
+    "        if p_paired < 1e-12:\n",
+    "            print(f\"p-value: {p_paired:.6e} (extremely significant)\")\n",
+    "        else:\n",
+    "            print(f\"p-value: {p_paired:.6e}\")\n",
+    "            \n",
+    "        print(f\"The difference is {'statistically significant' if p_paired < 0.05 else 'not statistically significant'}\")\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error performing paired t-test: {e}\")\n",
+    "        analysis_results['paired_t_test'] = {\n",
+    "            't_statistic': None,\n",
+    "            'p_value': None,\n",
+    "            'significant': False\n",
+    "        }\n",
+    "    \n",
+    "    # Analysis by quarter\n",
+    "    try:\n",
+    "        quarter_analysis = results_df.groupby('quarter').agg({\n",
+    "            'effective': ['count', 'sum', 'mean'],\n",
+    "            'efficiency_change': ['mean'],\n",
+    "            'run_terminated': ['mean']\n",
+    "        })\n",
+    "        analysis_results['by_quarter'] = quarter_analysis\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error in quarter analysis: {e}\")\n",
+    "        analysis_results['by_quarter'] = pd.DataFrame()\n",
+    "    \n",
+    "    # Analysis by season\n",
+    "    try:\n",
+    "        season_analysis = results_df.groupby('season').agg({\n",
+    "            'effective': ['count', 'sum', 'mean'],\n",
+    "            'efficiency_change': ['mean'],\n",
+    "            'run_terminated': ['mean']\n",
+    "        })\n",
+    "        analysis_results['by_season'] = season_analysis\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error in season analysis: {e}\")\n",
+    "        analysis_results['by_season'] = pd.DataFrame()\n",
+    "    \n",
+    "    # Analysis by run size\n",
+    "    try:\n",
+    "        if 'run_size_bin' in results_df.columns:\n",
+    "            run_size_analysis = results_df.groupby('run_size_bin').agg({\n",
+    "                'effective': ['count', 'sum', 'mean'],\n",
+    "                'efficiency_change': ['mean'],\n",
+    "                'run_terminated': ['mean']\n",
+    "            })\n",
+    "            analysis_results['by_run_size'] = run_size_analysis\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error in run size analysis: {e}\")\n",
+    "        analysis_results['by_run_size'] = pd.DataFrame()\n",
+    "    \n",
+    "    return analysis_results"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Perform statistical analysis\n",
+    "analysis_results = perform_statistical_analysis(results_df)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Let's examine the results by quarter and by season:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Display quarter analysis results\n",
+    "quarter_table = analysis_results['by_quarter'].copy()\n",
+    "quarter_table.columns = ['Count', 'Effective Count', 'Effectiveness Rate', 'Avg Efficiency Change', 'Run Termination Rate']\n",
+    "quarter_table['Effectiveness Rate'] = quarter_table['Effectiveness Rate'] * 100\n",
+    "quarter_table['Run Termination Rate'] = quarter_table['Run Termination Rate'] * 100\n",
+    "print(\"Timeout Effectiveness by Quarter:\")\n",
+    "quarter_table"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Display season analysis results\n",
+    "season_table = analysis_results['by_season'].copy()\n",
+    "season_table.columns = ['Count', 'Effective Count', 'Effectiveness Rate', 'Avg Efficiency Change', 'Run Termination Rate']\n",
+    "season_table['Effectiveness Rate'] = season_table['Effectiveness Rate'] * 100\n",
+    "season_table['Run Termination Rate'] = season_table['Run Termination Rate'] * 100\n",
+    "print(\"Timeout Effectiveness by Season:\")\n",
+    "season_table"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Display run size analysis results if available\n",
+    "if 'by_run_size' in analysis_results and not analysis_results['by_run_size'].empty:\n",
+    "    run_size_table = analysis_results['by_run_size'].copy()\n",
+    "    run_size_table.columns = ['Count', 'Effective Count', 'Effectiveness Rate', 'Avg Efficiency Change', 'Run Termination Rate']\n",
+    "    run_size_table['Effectiveness Rate'] = run_size_table['Effectiveness Rate'] * 100\n",
+    "    run_size_table['Run Termination Rate'] = run_size_table['Run Termination Rate'] * 100\n",
+    "    print(\"Timeout Effectiveness by Run Size:\")\n",
+    "    run_size_table"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 4. Data Visualization\n",
+    "\n",
+    "Now we'll create visualizations to better understand the patterns in our data."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Set Seaborn style\n",
+    "sns.set(style=\"whitegrid\")\n",
+    "plt.rcParams['figure.figsize'] = (12, 8)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.1 Distribution of Efficiency Change"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# 1. HISTOGRAM: Efficiency change distribution\n",
+    "def efficiency_histogram():\n",
+    "    plt.figure(figsize=(12, 8))\n",
+    "    \n",
+    "    # Get efficiency change data and statistics\n",
+    "    eff_change = results_df['efficiency_change']\n",
+    "    mean_change = eff_change.mean()\n",
+    "    median_change = eff_change.median()\n",
+    "    std_change = eff_change.std()\n",
+    "    \n",
+    "    # Create histogram with KDE\n",
+    "    ax = sns.histplot(eff_change, kde=True, bins=25, color='blue')\n",
+    "    \n",
+    "    # Add vertical lines for mean and median\n",
+    "    plt.axvline(mean_change, color='red', linestyle='--', label=f'Mean: {mean_change:.3f}')\n",
+    "    plt.axvline(median_change, color='green', linestyle=':', label=f'Median: {median_change:.3f}')\n",
+    "    \n",
+    "    # Add statistics text box\n",
+    "    stats_text = (\n",
+    "        f\"Mean: {mean_change:.3f}\\n\"\n",
+    "        f\"Median: {median_change:.3f}\\n\"\n",
+    "        f\"Std Dev: {std_change:.3f}\\n\"\n",
+    "        f\"Sample Size: {len(eff_change)}\"\n",
+    "    )\n",
+    "    plt.text(0.05, 0.95, stats_text, transform=plt.gca().transAxes, \n",
+    "            fontsize=12, va='top', ha='left',\n",
+    "            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))\n",
+    "    \n",
+    "    # Add t-test result if available\n",
+    "    if 't_test' in analysis_results and analysis_results['t_test']['t_statistic'] is not None:\n",
+    "        t_stat = analysis_results['t_test']['t_statistic']\n",
+    "        p_val = analysis_results['t_test']['p_value']\n",
+    "        # Format p-value using scientific notation for very small values\n",
+    "        if p_val < 1e-4:\n",
+    "            p_val_str = f\"{p_val:.2e}\"\n",
+    "        else:\n",
+    "            p_val_str = f\"{p_val:.4f}\"\n",
+    "            \n",
+    "        t_test_text = f\"t-test: t={t_stat:.3f}, p={p_val_str}\"\n",
+    "        plt.text(0.05, 0.80, t_test_text, transform=plt.gca().transAxes,\n",
+    "                fontsize=12, va='top', ha='left',\n",
+    "                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))\n",
+    "    \n",
+    "    # Add KDE explanation\n",
+    "    plt.text(0.05, 0.70, \"Blue curve: Density distribution\",\n",
+    "            transform=plt.gca().transAxes, fontsize=12, va='top', ha='left',\n",
+    "            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))\n",
+    "    \n",
+    "    plt.xlabel('Change in Offensive Efficiency (Post-Timeout minus Pre-Timeout)\\nPoints Per Possession', fontsize=14)\n",
+    "    plt.ylabel('Frequency', fontsize=14)\n",
+    "    plt.title('Distribution of Opponent Offensive Efficiency Change After Timeouts', fontsize=16)\n",
+    "    plt.legend()\n",
+    "    \n",
+    "    plt.tight_layout()\n",
+    "    return plt.gcf()\n",
+    "\n",
+    "# Create and display the histogram\n",
+    "fig_hist = efficiency_histogram()\n",
+    "plt.show()
+
+# 5. Conclusions and Summary
+
+def generate_summary_report(results_df, analysis_results):
+    """Generate a summary report of the analysis"""
+    
+    if results_df is None or results_df.empty or not analysis_results:
+        return "No analysis results to report."
+    
+    # Overall results
+    overall = analysis_results.get('overall', {})
+    total_timeouts = overall.get('total_timeouts', 0)
+    effective_timeouts = overall.get('effective_timeouts', 0)
+    effectiveness_rate = overall.get('effectiveness_rate', 0)
+    avg_efficiency_change = overall.get('avg_efficiency_change', 0)
+    
+    # T-test results
+    t_test = analysis_results.get('t_test', {})
+    t_statistic = t_test.get('t_statistic', None)
+    p_value = t_test.get('p_value', None)
+    significant = t_test.get('significant', False)
+    
+    # Create summary report
+    report = [
+        "# NBA Timeout Analysis Summary Report",
+        "",
+        "## Overall Results",
+        "",
+        f"* Total timeouts analyzed: {total_timeouts}",
+        f"* Effective timeouts: {effective_timeouts} ({effectiveness_rate*100:.1f}%)",
+        f"* Average change in opponent offensive efficiency: {avg_efficiency_change:.3f} points per possession",
+        "",
+        "## Statistical Significance",
+        ""
+    ]
+    
+    if t_statistic is not None and p_value is not None:
+        # Format p-value using scientific notation for very small values
+        if p_value < 1e-4:
+            p_value_str = f"{p_value:.6e}"
+        else:
+            p_value_str = f"{p_value:.6f}"
+            
+        report.extend([
+            f"* t-statistic: {t_statistic:.3f}",
+            f"* p-value: {p_value_str}",
+            f"* Result: The effect of timeouts on opponent offensive efficiency is {'statistically significant' if significant else 'not statistically significant'}",
+            ""
+        ])
+    else:
+        report.extend([
+            "* Statistical test could not be performed due to insufficient data",
+            ""
+        ])
+    
+    # Hypothesis test
+    report.extend([
+        "## Hypothesis Test Results",
+        "",
+        "**Null Hypothesis (H₀):** When the opponent team makes a scoring run and a timeout is called, the opponent's average offensive efficiency from the start of the period to the timeout equals its average offensive efficiency from the timeout to the end of the period.",
+        ""
+    ])
+    
+    if t_statistic is not None:
+        if significant:
+            if avg_efficiency_change < 0:
+                report.append("**Result:** p-value < 0.05, rejecting the null hypothesis. Timeouts have been found to significantly reduce opponent offensive efficiency.")
+            else:
+                report.append("**Result:** p-value < 0.05, rejecting the null hypothesis. Timeouts have been found to significantly affect opponent offensive efficiency, but surprisingly, efficiency increases after timeouts rather than decreases.")
+        else:
+            report.append("**Result:** p-value > 0.05, failing to reject the null hypothesis. There is insufficient evidence to conclude that timeouts significantly affect opponent offensive efficiency.")
+    
+    # Conclusion
+    report.extend([
+        "",
+        "## Conclusion",
+        ""
+    ])
+    
+    if t_statistic is not None and significant:
+        if avg_efficiency_change < 0:
+            report.append("The analysis demonstrates that timeouts are effective in disrupting opponent momentum. After an opponent's scoring run, timeouts lead to a statistically significant decrease in their offensive efficiency. This provides empirical evidence supporting the common basketball coaching practice of calling timeouts to \"stop the bleeding\" when the opponent is on a run.")
+        else:
+            report.append("Contrary to conventional basketball wisdom, the analysis reveals that timeouts might actually enhance opponent momentum. Following an opponent's scoring run, timeouts lead to a statistically significant increase in their offensive efficiency. This unexpected finding challenges the traditional coaching strategy of calling timeouts to disrupt opponent momentum.")
+    else:
+        report.append("The analysis does not provide statistical evidence that timeouts significantly disrupt opponent momentum. While there is a slight change in offensive efficiency after timeouts, this difference is not statistically significant. This suggests that the common practice of calling timeouts to \"stop the bleeding\" may be less effective than traditionally believed.")
+    
+    # Limitations and future work
+    report.extend([
+        "",
+        "## Limitations and Future Work",
+        "",
+        "This analysis has several limitations that should be considered:",
+        "",
+        "1. **Sample Size**: The analysis is based on a subset of NBA games and may not perfectly represent all timeout situations.",
+        "2. **Causality**: While we observe changes in efficiency after timeouts, these changes could be influenced by factors beyond the timeout itself.",
+        "3. **Context**: Not all timeouts are called solely to disrupt momentum; coaches may call timeouts for strategic purposes or to rest players.",
+        "4. **Data Quality**: Play-by-play data, especially from older seasons, may contain inconsistencies or missing information.",
+        "",
+        "Future research could explore:",
+        "",
+        "- Comparing timeout effectiveness in playoff games versus regular season games",
+        "- Examining the impact of different coaches on timeout effectiveness",
+        "- Analyzing different types of timeouts (full vs. 20-second)",
+        "- Investigating specific plays drawn up during timeouts",
+        "- Expanding the analysis to include international leagues and college basketball"
+    ])
+    
+    return '\n'.join(report)
+
+# Generate and display the summary report
+summary_report = generate_summary_report(results_df, analysis_results)
+print(summary_report)
+
+# 6. Saving the Results
+
+# Save the report to a markdown file
+with open('outputs/timeout_analysis_report.md', 'w', encoding='utf-8') as f:
+    f.write(summary_report)
+print("Summary report saved to 'outputs/timeout_analysis_report.md'")
+
+# Save all figures
+figures = {
+    'efficiency_change_histogram.png': fig_hist,
+    'efficiency_by_quarter_boxplot.png': fig_quarter,
+    'pre_vs_post_timeout_scatter.png': fig_scatter,
+    'effectiveness_by_season_bar.png': fig_season,
+    'run_termination_by_season.png': fig_stacked,
+    'timeout_effectiveness_pie.png': fig_pie,
+    'pre_post_shooting_comparison.png': fig_shooting
+}
+
+# Add run size figure if available
+if 'run_size_bin' in results_df.columns and 'fig_run_size' in locals():
+    figures['efficiency_by_run_size_boxplot.png'] = fig_run_size
+
+# Save all figures
+for filename, fig in figures.items():
+    if fig is not None:
+        fig.savefig(f'outputs/figures/{filename}', dpi=300, bbox_inches='tight')
+        print(f"Saved figure: {filename}")
+
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.8"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
+
+
+# 4.8 Pre vs Post Timeout Shooting Metrics
+
+def pre_post_metrics_comparison():
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # 1. Field Goal Percentage Comparison
+    pre_fg = results_df['pre_timeout_fg_pct']
+    post_fg = results_df['post_timeout_fg_pct']
+    
+    # Calculate statistics
+    pre_fg_mean = pre_fg.mean()
+    post_fg_mean = post_fg.mean()
+    t_stat_fg, p_val_fg = stats.ttest_rel(pre_fg, post_fg)
+    
+    # Format p-value using scientific notation for very small values
+    if p_val_fg < 1e-4:
+        p_val_fg_str = f"{p_val_fg:.2e}"
+    else:
+        p_val_fg_str = f"{p_val_fg:.4f}"
+    
+    # Create bar chart
+    x = ['Pre-Timeout', 'Post-Timeout']
+    y = [pre_fg_mean, post_fg_mean]
+    
+    ax1.bar(x, y, color=['blue', 'red'], alpha=0.7)
+    
+    # Add data labels
+    ax1.text(0, pre_fg_mean+0.01, f"{pre_fg_mean:.1%}", ha='center', fontsize=12)
+    ax1.text(1, post_fg_mean+0.01, f"{post_fg_mean:.1%}", ha='center', fontsize=12)
+    
+    # Add statistical test results
+    if p_val_fg < 0.05:
+        significance = "Significant difference"
+    else:
+        significance = "Not significant"
+        
+    ax1.text(0.5, max(y)*1.1, f"p={p_val_fg_str}\n{significance}", 
+           ha='center', fontsize=12,
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Format y-axis as percentage
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+    
+    ax1.set_ylim(0, max(y)*1.2)  # Add some space for labels
+    ax1.set_title('Field Goal Percentage Comparison', fontsize=14)
+    ax1.set_ylabel('Field Goal Percentage', fontsize=12)
+    
+    # 2. True Shooting Percentage Comparison
+    pre_ts = results_df['pre_timeout_ts']
+    post_ts = results_df['post_timeout_ts']
+    
+    # Calculate statistics
+    pre_ts_mean = pre_ts.mean()
+    post_ts_mean = post_ts.mean()
+    t_stat_ts, p_val_ts = stats.ttest_rel(pre_ts, post_ts)
+    
+    # Format p-value using scientific notation for very small values
+    if p_val_ts < 1e-4:
+        p_val_ts_str = f"{p_val_ts:.2e}"
+    else:
+        p_val_ts_str = f"{p_val_ts:.4f}"
+    
+    # Create bar chart
+    y = [pre_ts_mean, post_ts_mean]
+    
+    ax2.bar(x, y, color=['blue', 'red'], alpha=0.7)
+    
+    # Add data labels
+    ax2.text(0, pre_ts_mean+0.01, f"{pre_ts_mean:.1%}", ha='center', fontsize=12)
+    ax2.text(1, post_ts_mean+0.01, f"{post_ts_mean:.1%}", ha='center', fontsize=12)
+    
+    # Add statistical test results
+    if p_val_ts < 0.05:
+        significance = "Significant difference"
+    else:
+        significance = "Not significant"
+        
+    ax2.text(0.5, max(y)*1.1, f"p={p_val_ts_str}\n{significance}", 
+           ha='center', fontsize=12,
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Format y-axis as percentage
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+    
+    ax2.set_ylim(0, max(y)*1.2)  # Add some space for labels
+    ax2.set_title('True Shooting Percentage Comparison', fontsize=14)
+    ax2.set_ylabel('True Shooting Percentage', fontsize=12)
+    
+    plt.suptitle('Opponent Shooting Efficiency: Pre-Timeout vs Post-Timeout', fontsize=16)
+    
+    plt.tight_layout()
+    return fig
+
+# Create and display the shooting metrics comparison
+fig_shooting = pre_post_metrics_comparison()
+plt.show()
+
+# 4.7 Overall Timeout Effectiveness
+
+def timeout_effectiveness_pie():
+    plt.figure(figsize=(10, 10))
+    
+    # Calculate effectiveness statistics
+    effective_count = int(results_df['effective'].sum())
+    ineffective_count = len(results_df) - effective_count
+    effective_rate = results_df['effective'].mean()
+    ineffective_rate = 1 - effective_rate
+    
+    # Create data for the pie chart
+    labels = [f'Effective\n{effective_count} timeouts ({effective_rate:.1%})', 
+             f'Ineffective\n{ineffective_count} timeouts ({ineffective_rate:.1%})']
+    sizes = [effective_rate * 100, ineffective_rate * 100]
+    colors = ['green', 'red']
+    explode = (0.1, 0)  # Explode the first slice
+    
+    # Create pie chart
+    patches, texts, autotexts = plt.pie(sizes, explode=explode, labels=labels, colors=colors,
+                                      autopct='%1.1f%%', shadow=True, startangle=90, 
+                                      textprops={'fontsize': 14, 'fontweight': 'bold'})
+    
+    # Equal aspect ratio ensures the pie chart is circular
+    plt.axis('equal')
+    
+    # Add title
+    plt.title('Overall Timeout Effectiveness\n(Ability to Reduce Opponent Offensive Efficiency)', fontsize=16)
+    
+    plt.tight_layout()
+    return plt.gcf()
+
+# Create and display the pie chart
+fig_pie = timeout_effectiveness_pie()
+plt.show()
+
+# 4.6 Run Termination by Season
+
+def run_termination_by_season():
+    # Calculate run termination by season
+    season_data = results_df.groupby('season').agg({
+        'run_terminated': ['count', 'sum']
+    }).reset_index()
+    
+    # Convert to DataFrame with renamed columns
+    season_data.columns = ['Season', 'Total', 'Terminated']
+    season_data['Continued'] = season_data['Total'] - season_data['Terminated']
+    
+    plt.figure(figsize=(14, 8))
+    
+    # Create stacked bar chart
+    plt.bar(season_data['Season'], season_data['Terminated'], 
+          color='green', label='Run Terminated')
+    plt.bar(season_data['Season'], season_data['Continued'], 
+          bottom=season_data['Terminated'], color='red', label='Run Continued')
+    
+    # Add data labels
+    for i, season in enumerate(season_data['Season']):
+        total = season_data.iloc[i]['Total']
+        terminated = season_data.iloc[i]['Terminated']
+        term_rate = terminated / total
+        
+        # Add percentage on green bars (clearer to know it belongs to green)
+        plt.text(i, terminated/2, f"{term_rate:.1%}", 
+               ha='center', va='center', color='white', fontweight='bold',
+               fontsize=12)
+        
+        # Add total count on top
+        plt.text(i, total + 1, f"n={total}", 
+               ha='center', va='bottom')
+    
+    plt.xlabel('NBA Season', fontsize=14)
+    plt.ylabel('Number of Timeouts', fontsize=14)
+    plt.title('Opponent Scoring Run Termination by Season', fontsize=16)
+    
+    # Add a legend with clear labels
+    plt.legend(loc='upper left', title="Percentage shows Run Termination Rate")
+    
+    plt.tight_layout()
+    return plt.gcf()
+
+# Create and display the stacked bar chart
+fig_stacked = run_termination_by_season()
+plt.show()
+
+# 4.5 Timeout Effectiveness by Season
+
+def season_effectiveness_bars():
+    # Get season effectiveness data
+    season_effectiveness = results_df.groupby('season').agg({
+        'effective': ['count', 'mean'],
+        'efficiency_change': 'mean'
+    }).reset_index()
+    
+    # Convert to DataFrame with renamed columns
+    season_effectiveness.columns = ['Season', 'Count', 'Effectiveness', 'Avg_Change']
+    
+    plt.figure(figsize=(14, 10))
+    
+    # Create bar chart
+    bars = plt.bar(season_effectiveness['Season'], season_effectiveness['Effectiveness'], 
+                  color='skyblue', edgecolor='navy')
+    
+    # Add data labels on top of each bar
+    for i, bar in enumerate(bars):
+        count = season_effectiveness.iloc[i]['Count']
+        pct = season_effectiveness.iloc[i]['Effectiveness'] * 100
+        avg_change = season_effectiveness.iloc[i]['Avg_Change']
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f"n={count}\n{pct:.1f}%\nΔ={avg_change:.3f}", ha='center', va='bottom', fontsize=10)
+    
+    # Add horizontal line for overall effectiveness
+    overall_effectiveness = results_df['effective'].mean()
+    plt.axhline(y=overall_effectiveness, color='red', linestyle='--', 
+               label=f'Overall: {overall_effectiveness:.1%}')
+    
+    # Format y-axis as percentage
+    plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+    
+    plt.xlabel('NBA Season', fontsize=14)
+    plt.ylabel('Timeout Effectiveness Rate\n(% of Timeouts that Reduced Opponent Efficiency)', fontsize=14)
+    plt.title('Timeout Effectiveness Rate by NBA Season', fontsize=16)
+    plt.ylim(0, max(season_effectiveness['Effectiveness']) * 1.2)  # Add some space for labels
+    plt.legend()
+    
+    plt.tight_layout()
+    return plt.gcf()
+
+# Create and display the season effectiveness bar chart
+fig_season = season_effectiveness_bars()
+plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The histogram shows the distribution of changes in offensive efficiency after timeouts. Negative values indicate a decrease in offensive efficiency (timeout was effective), while positive values indicate an increase (timeout was ineffective)."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.2 Efficiency Change by Quarter"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# 2. BOX PLOT: Efficiency change by quarter\n",
+    "def quarter_boxplot():\n",
+    "    plt.figure(figsize=(12, 8))\n",
+    "    \n",
+    "    # Create boxplot\n",
+    "    ax = sns.boxplot(x='quarter', y='efficiency_change', data=results_df)\n",
+    "    \n",
+    "    # Add sample size and mean information to each quarter\n",
+    "    for i, quarter in enumerate(sorted(results_df['quarter'].unique())):\n",
+    "        quarter_data = results_df[results_df['quarter'] == quarter]\n",
+    "        count = len(quarter_data)\n",
+    "        mean = quarter_data['efficiency_change'].mean()\n",
+    "        \n",
+    "        # Add text above each box\n",
+    "        plt.text(i, plt.ylim()[1]*0.9, f\"n = {count}\\nMean = {mean:.3f}\", \n",
+    "                 ha='center', va='top', fontsize=11,\n",
+    "                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))\n",
+    "    \n",
+    "    plt.xlabel('Game Quarter', fontsize=14)\n",
+    "    plt.ylabel('Change in Offensive Efficiency\\n(Post-Timeout minus Pre-Timeout)\\nPoints Per Possession', fontsize=14)\n",
+    "    plt.title('Offensive Efficiency Change by Quarter', fontsize=16)\n",
+    "    \n",
+    "    plt.tight_layout()\n",
+    "    return plt.gcf()\n",
+    "\n",
+    "# Create and display the quarter boxplot\n",
+    "fig_quarter = quarter_boxplot()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The boxplot shows how timeout effectiveness varies across different quarters of the game."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.3 Efficiency Change by Run Size"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# 3. BOX PLOT: Offensive efficiency change by run size\n",
+    "def run_size_boxplot():\n",
+    "    if 'run_size_bin' not in results_df.columns:\n",
+    "        print(\"Run size data not available\")\n",
+    "        return None\n",
+    "    \n",
+    "    plt.figure(figsize=(12, 8))\n",
+    "    \n",
+    "    # Get unique run sizes and filter out empty ones\n",
+    "    run_sizes = sorted([size for size in results_df['run_size_bin'].unique() if not pd.isna(size)])\n",
+    "    \n",
+    "    # Filter data to only include valid run sizes\n",
+    "    filtered_df = results_df[results_df['run_size_bin'].isin(run_sizes)]\n",
+    "    \n",
+    "    # Create boxplot with filtered data\n",
+    "    ax = sns.boxplot(x='run_size_bin', y='efficiency_change', data=filtered_df, order=run_sizes)\n",
+    "    \n",
+    "    # Add sample size and mean information to each run size\n",
+    "    for i, run_size in enumerate(run_sizes):\n",
+    "        run_data = filtered_df[filtered_df['run_size_bin'] == run_size]\n",
+    "        count = len(run_data)\n",
+    "        mean = run_data['efficiency_change'].mean()\n",
+    "        \n",
+    "        # Add text above each box\n",
+    "        plt.text(i, plt.ylim()[1]*0.9, f\"n = {count}\\nMean = {mean:.3f}\", \n",
+    "               ha='center', va='top', fontsize=11,\n",
+    "               bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))\n",
+    "    \n",
+    "    plt.xlabel('Opponent Scoring Run Size (Points)', fontsize=14)\n",
+    "    plt.ylabel('Change in Offensive Efficiency\\n(Post-Timeout minus Pre-Timeout)\\nPoints Per Possession', fontsize=14)\n",
+    "    plt.title('Offensive Efficiency Change by Opponent Scoring Run Size', fontsize=16)\n",
+    "    \n",
+    "    # Adjust figure size to remove excess whitespace\n",
+    "    plt.xlim(-0.5, len(run_sizes)-0.5)\n",
+    "    \n",
+    "    plt.tight_layout()\n",
+    "    return plt.gcf(
