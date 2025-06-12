@@ -80,3 +80,8 @@ Under the same scenario, the opponent team’s average offensive efficiency from
 
 ## Conclusion
 By analyzing the impact of timeouts on offensive efficiency, this project will provide valuable insights into a key tactical decision in basketball. The findings are expected to clarify whether timeouts effectively disrupt scoring momentum and to identify the conditions under which they are most successful. These results will benefit coaches, analysts, and enthusiasts by offering evidence-based strategies for managing game flow.
+
+
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
